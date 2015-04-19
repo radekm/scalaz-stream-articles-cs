@@ -15,14 +15,14 @@ a jak je lze propojit pomocí rour.
 </p>
 
 <p>
-V článku budeme pracovat s knihovnou scalaz-stream verze 0.6a,
+V článku budeme pracovat s knihovnou scalaz-stream verze 0.7a,
 začneme jejím stažením:
 </p>
 
 <pre>
 git clone https://github.com/scalaz/scalaz-stream
 cd scalaz-stream
-git checkout series/0.6a
+git checkout series/0.7a
 </pre>
 
 <p>
@@ -113,7 +113,7 @@ val s: Process[Task, Any] = p
 
 <p>
 Chceme-li změnit typ požadavku z <code>Nothing</code> na <code>Task</code>,
-lze použít funkci <code>liftIO</code>.
+lze použít funkci <code>toSource</code>.
 </p>
 
 <p>
@@ -201,7 +201,7 @@ io.linesR("file.txt").run.run
 </pre>
 
 <p>
-Přirozenou otázkou je, proč se <code>run</code> používá dvakrát. 
+Přirozenou otázkou je, proč se <code>run</code> používá dvakrát.
 <code>io.linesR("file.txt")</code> má typ
 <code>Process[Task, String]</code> a první volání <code>run</code>
 z tohoto procesu vytvoří hodnotu typu <code>Task[Unit]</code>.
@@ -235,7 +235,8 @@ Stejně jako <code>run</code> ani <code>runLog</code>
 neprovádí žádné vedlejší efekty, jedná se pouze
 o transformaci procesu s požadavky typu <code>F[_]</code>
 na hodnotu typu <code>F[Unit]</code> v případě <code>run</code>
-resp. <code>F[A]</code> v případě <code>runLog</code>.
+resp. <code>F[A]</code> v případě <code>runLog</code>
+(<code>A</code> je typ produkovaných prvků).
 Je to až druhý <code>run</code> na hodnotě typu <code>Task[Unit]</code>
 resp. <code>Task[A]</code>, jenž provede vedlejší efekty.
 </p>
@@ -276,7 +277,7 @@ aby měl požadavky typu <code>Task</code>:
 </p>
 
 <pre>
-emit(1).liftIO.runLog.run
+emit(1).toSource.runLog.run
 </pre>
 
 <h2>Transformace proudů</h2>
