@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta http-equiv="content-type" content="text/html; charset=utf8">
+<title>scalaz-stream 2: Transformace proudů</title>
+</head>
+
+<body>
+<h1>scalaz-stream 2: Transformace proudů</h1>
+
+<p>
+Proudy dat jsou v knihovně scalaz-stream reprezentovány jako procesy.
+V tomto článku si řekneme, co je to proces, ukážeme si, jak se procesy konstruují
+a jak je lze propojit pomocí rour.
+</p>
+
+<p>
+V článku budeme pracovat s knihovnou scalaz-stream verze 0.6a,
+začneme jejím stažením:
+</p>
+
+<pre>
+git clone https://github.com/scalaz/scalaz-stream
+cd scalaz-stream
+git checkout series/0.6a
+</pre>
+
+<p>
+Knihovnu budeme používat z REPLu:
+</p>
+
+<pre>
+./sbt console
+</pre>
+
+<p>
+Příklady v článku předpokládají následující importy:
+</p>
+
+<pre>
+import scalaz.concurrent.Task
+import scalaz.stream
+</pre>
+
+<h2>Konstrukce procesů</h2>
+
+<p>
+Knihovna scalaz-stream reprezentuje proudy dat jako procesy,
+které provádí určité požadavky a na základě jejich výsledků
+produkují prvky. Tyto procesy mají typ
+<code>Process[F[_], A]</code>, kde <code>F</code> je typ požadavků
+a <code>A</code> je typ produkovaných prvků.
+Například proud řádků ze souboru je reprezentován procesem
+</p>
+
+<pre>
+io.linesR("file.txt")
+</pre>
+
+<p>
+typu <code>Process[Task, String]</code>. Tento proces dělá požadavky typu
+<code>Task</code> a produkuje řádky typu <code>String</code>.
+<code>Task</code> je typ požadavků, jenž zahrnují vedlejší efekty,
+zejména (asynchronní) vstup a výstup. Typ <code>Process[Task, String]</code>
+nám tedy říká, že proces bude dělat vstup a výstup a produkovat řetězce.
+</p>
+
+<p>
+Jak jsme viděli minule, s procesy lze v určitých situacích pracovat
+jako se sekvencemi. Například prázdnou sekvenci resp. sekvenci
+s prvky 1, 2, 4, 8 zkonstruujeme takto
+</p>
+
+<pre>
+Seq.empty // Alternativne: Seq()
+Seq(1, 2, 4, 8)
+</pre>
+
+<p>
+a analogicky zkonstruujeme proces, jenž neprodukuje žádné prvky
+resp. produkuje prvky 1, 2, 4, 8
+</p>
+
+<pre>
+Process.empty // Alternativne: Process()
+Process(1, 2, 4, 8)
+</pre>
+
+<p>
+Tyto dva procesy mají typ <code>Process[Nothing, Nothing]</code> resp.
+<code>Process[Nothing, Int]</code>. Z typů je patrné, že první proces
+neprodukuje žádné prvky a druhý proces produkuje celá čísla.
+Dále je vidět, že oba procesy nedělají žádné požadavky.
+</p>
+
+<p>
+Typ procesů je kovariantní v obou parametrech, tudíž máme-li
+</p>
+
+<pre>
+val p: Process[Nothing, Int] = Process(1)
+</pre>
+
+<p>
+lze provést následující přiřazení
+</p>
+
+<pre>
+val q: Process[Task, Int] = p
+val r: Process[Nothing, Any] = p
+val s: Process[Task, Any] = p
+</pre>
+
+<p>
+Chceme-li změnit typ požadavku z <code>Nothing</code> na <code>Task</code>,
+lze použít funkci <code>liftIO</code>.
+</p>
+
+<p>
+V modulu <code>Process</code>
+</p>
+
+<pre>
+import Process._
+</pre>
+
+<p>
+se nachází celá řada funkcí pro konstrukci
+procesů. Oblíbené jsou například funkce <code>emit</code> a <code>emitAll</code>.
+První vytváří proces, jenž produkuje právě jeden prvek,
+druhá vytváří proces, jenž produkuje prvky z dané sekvence.
+Tedy
+</p>
+
+<pre>
+emit(1)
+</pre>
+
+<p>
+se chová jako <code>Process(1)</code> a
+</p>
+
+<pre>
+emitAll(Seq(1, 2, 4))
+</pre>
+
+<p>
+se chová jako <code>Process(Seq(1, 2, 4): _*)</code>. Předaná sekvence
+může být i nekonečná:
+</p>
+
+<pre>
+emitAll(Stream.continually(1))
+</pre>
+
+<p>
+Procesy, jenž produkují nekonečně mnoho prvků, můžeme
+vytvářet i bez nekonečných sekvencí. Například
+</p>
+
+<pre>
+Process(1, 2, 3).repeat
+</pre>
+
+<p>
+se chová jako <code>Process(1, 2, 3) ++ Process(1, 2, 3) ++ Process(1, 2, 3) ++ &hellip;</code>,
+což můžeme zapsat také pomocí rekurze
+</p>
+
+<pre>
+def repeated: Process[Nothing, Int] =
+    Process(1, 2, 3) ++ repeated
+</pre>
+
+<p>
+Vyhodnocení výrazu <code>repeated</code> skončí díky tomu, že se druhý argument <code>++</code>
+předává jménem &ndash; tedy nevyhodnocuje se před zavoláním funkce <code>++</code>.
+Při vytváření složitějších procesů využijeme funkce s parametry:
+</p>
+
+<pre>
+def fib(a: Int = 0, b: Int = 1): Process[Nothing, Int] =
+    emit(a) ++ fib(b, a + b)
+</pre>
+
+<p>
+Volání <code>fib()</code> vytvoří proces Fibonacciho čísel,
+stav procesu se předává pomocí parametrů funkce.
+</p>
+
+<h2>Spouštění procesů</h2>
+
+<p>
+Chceme-li, aby program něco dělal, musíme ho spustit. Stejně to funguje i s procesy &ndash;
+aby proces něco dělal, musíme ho spustit. V minulém díle jsme procesy spouštěli
+dvojím voláním funkce <code>run</code>:
+</p>
+
+<pre>
+io.linesR("file.txt").run.run
+</pre>
+
+<p>
+Přirozenou otázkou je, proč se <code>run</code> používá dvakrát. 
+<code>io.linesR("file.txt")</code> má typ
+<code>Process[Task, String]</code> a první volání <code>run</code>
+z tohoto procesu vytvoří hodnotu typu <code>Task[Unit]</code>.
+První volání vlastně nahradí proces, který dělal požadavky typu
+<code>Task[_]</code>, jedním velkým požadavkem typu <code>Task[Unit]</code>.
+A jak už asi tušíte, aby se něco stalo, i tento velký požadavek typu
+<code>Task[Unit]</code> je třeba spustit,
+což se provede druhým voláním <code>run</code>. Výraz
+</p>
+
+<pre>
+io.linesR("file.txt").run.run
+</pre>
+
+<p>
+přečte řádky souboru <code>file.txt</code> a vrátí <code>Unit</code>.
+Pokud bychom chtěli vrátit přečtené řádky,
+musíme místo prvního <code>run</code> použít <code>runLog</code>:
+</p>
+
+<pre>
+io.linesR("file.txt").runLog.run
+</pre>
+
+<p>
+<code>runLog</code> uloží prvky, jenž proces vyprodukuje.
+V našem případě <code>runLog</code> vrátí hodnotu
+typu <code>Task[IndexedSeq[String]]</code>,
+jejímž spuštěním dostaneme sekvenci řádků souboru.
+Stejně jako <code>run</code> ani <code>runLog</code>
+neprovádí žádné vedlejší efekty, jedná se pouze
+o transformaci procesu s požadavky typu <code>F[_]</code>
+na hodnotu typu <code>F[Unit]</code> v případě <code>run</code>
+resp. <code>F[A]</code> v případě <code>runLog</code>.
+Je to až druhý <code>run</code> na hodnotě typu <code>Task[Unit]</code>
+resp. <code>Task[A]</code>, jenž provede vedlejší efekty.
+</p>
+
+<p>
+<code>run</code> a <code>runLog</code> jde použít pouze na procesy,
+kde typ požadavku splňuje určité vlastnosti (přesněji: typ požadavků
+musí mít instanci <code>Monad</code> a <code>Catchable</code>;
+<code>Process</code> pak můžeme chápat jako monad transformer).
+Například proces, jenž neprovádí žádné požadavky, má typ požadavku
+<code>Nothing</code>, který tyto vlastnosti nesplňuje, proto nelze psát
+</p>
+
+<pre>
+emit(1).runLog
+</pre>
+
+<p>
+Pro procesy, jenž neprovádí žádné požadavky,
+máme typový alias <code>Process0</code>
+</p>
+
+<pre>
+emit(1): Process0[Int]
+</pre>
+
+<p>
+a produkované prvky lze získat pomocí funkce <code>toList</code>
+</p>
+
+<pre>
+emit(1).toList
+</pre>
+
+<p>
+Alternativně můžeme využít kovarianci procesů a proces přetypovat,
+aby měl požadavky typu <code>Task</code>:
+</p>
+
+<pre>
+emit(1).liftIO.runLog.run
+</pre>
+
+<h2>Transformace proudů</h2>
+
+<p>
+Síla knihovny scalaz-stream spočívá v tom, že složitou funkcionalitu
+lze poskládat z malých a znovupoužitelných dílků.
+Například máme-li proces, jenž produkuje čísla 0, 1, 2, -3
+</p>
+
+<pre>
+Process(0, 1, 2, -3)
+</pre>
+
+<p>
+a proces, jenž filtruje kladná čísla
+</p>
+
+<pre>
+process1.filter[Int](_ > 0)
+</pre>
+
+<p>
+pak tyto procesy můžeme propojit pomocí funkce <code>|></code>
+</p>
+
+<pre>
+Process(0, 1, 2, -3) |> process1.filter(_ > 0)
+</pre>
+
+<p>
+čímž získáme proces, jenž produkuje čísla 1, 2.
+<code>|></code> funguje jako roura z shellu,
+zápis <code>p |> q</code> napojí výstup procesu <code>p</code>
+na vstup procesu <code>q</code>. <code>process1.filter[Int](_ > 0)</code>
+má typ <code>Process1[Int, Int]</code>. Typ <code>Process1[A, B]</code>
+značí procesy, které dělají požadavky na prvky typu <code>A</code>
+a produkují prvky typu <code>B</code>. <code>Process1[A, B]</code> je typový alias
+pro <code>Process[Env[A,Any]#Is, B]</code> &ndash; typ požadavků tedy není <code>A</code>,
+ale <code>Env[A,Any]#Is</code>. Alternativně lze místo <code>|></code> použít funkci
+<code>pipe</code>, tj. <code>p.pipe(q)</code> je jiný zápis <code>p |> q</code>.
+</p>
+
+<p>
+Modul <code>process1</code> je plný procesů typu <code>Process1</code>,
+které jde použít pro transformaci proudů. Některé z těchto transformací
+jako například <code>filter</code> nebo <code>collect</code>
+se používají tak často, že si vysloužili zkratku, například místo
+</p>
+
+<pre>
+Process(0, 1, 2, -3) |> process1.filter(_ > 0)
+</pre>
+
+<p>
+můžeme psát
+</p>
+
+<pre>
+Process(0, 1, 2, -3).filter(_ > 0)
+</pre>
+
+<p>
+Jelikož <code>Process0[B]</code> je podtyp <code>Process1[A, B]</code>,
+lze proces typu <code>Process0[B]</code> použít všude, kde je očekáván proces
+typu <code>Process1[A, B]</code>:
+</p>
+
+<pre>
+io.linesR("file.txt") |> emit(1)
+</pre>
+
+<p>
+Roura funguje na principu pull. Máme-li <code>p |> q</code>,
+roura interpretuje <code>q</code> a v okamžiku, kdy <code>q</code>
+požaduje prvek z <code>p</code>, roura začne interpretovat <code>p</code>,
+dokud <code>p</code> nevyprodukuje prvek nebo neskončí, pak pokračuje
+v interpretaci <code>q</code>. Jelikož proces <code>emit(1)</code>
+žádný prvek nepožaduje, není důvod začít interpretovat proces
+<code>io.linesR("file.txt")</code>, tedy k otevření souboru
+<code>file.txt</code> nedojde.
+</p>
+
+<p>
+Hodnoty typu <code>Process1</code> jde kombinovat standardním způsobem. Například vezmeme-li
+</p>
+
+<pre>
+val p: Process1[Int, Int] = await1
+val q: Process1[Int, Int] = process1.skip
+</pre>
+
+pak
+
+<pre>
+(p ++ q).repeat
+</pre>
+
+<p>
+je proces, jenž vypustí každý druhý prvek. <code>process1.skip</code>
+načte jeden prvek a skončí, žádný prvek není vyprodukován.
+<code>await1</code> načte jeden prvek, vyprodukuje ho a skončí.
+Zobecněním <code>await1</code> je proces <code>process1.take(n)</code>,
+který načte <code>n</code> prvků a skončí, přičemž každý prvek je ihned
+po načtení vyprodukován. <code>await1</code> je tedy totéž, co <code>process1.take(1)</code>.
+Například chceme-li aplikovat filtr pouze na prvních 5 prvků, můžeme psát
+</p>
+
+<pre>
+process1.take[Int](5).filter(_ > 0) ++ process1.id
+</pre>
+
+<p>
+kde <code>process1.id</code> je identita &ndash; proces,
+který načítá prvky a beze změn je produkuje.
+</p>
+
+
+<h2>Psaní vlastních transformací</h2>
+
+<p>
+Důležitými stavebními kameny při psaní procesů typu <code>Process1</code>
+jsou funkce <code>await1</code> a <code>flatMap</code>. <code>flatMap</code>,
+známý ze sekvencí, zamění každý prvek procesu za proces.
+<code>Process(1, 2, 3).map(f)</code> se chová jako
+</p>
+
+<pre>
+emit(f(1)) ++ emit(f(2)) ++ emit(f(3))
+</pre>
+
+<p>
+a <code>Process(1, 2, 3).flatMap(f)</code> se chová jako
+</p>
+
+<pre>
+f(1) ++ f(2) ++ f(3)
+</pre>
+
+<p>
+Mějme predikát <code>positive</code> na celých číslech:
+</p>
+
+<pre>
+def positive(i: Int) = i > 0
+</pre>
+
+<p>
+Chceme-li definovat <code>process1.filter(positive)</code>, začneme
+procesem, který přefiltruje jeden prvek a pak skončí:
+</p>
+
+<pre>
+val filterOne = await1[Int].flatMap { x =>
+  if (positive(x)) emit(x)
+  else empty
+}
+</pre>
+
+<p>
+Je-li <code>x</code> kladné, je vyprodukováno (<code>emit(x)</code>),
+v opačném případě není vyprodukováno nic (<code>empty</code>).
+S  pomocí <code>filterOne</code> definujeme <code>process1.filter(positive)</code> jako
+</p>
+
+<pre>
+filterOne.repeat
+</pre>
+
+<p>
+Ekvivalentem zápisu <code>await1.flatMap(f)</code> je zápis <code>receive1(f)</code>.
+Proces <code>receive1(f)</code> načte prvek <code>x</code> a pokračuje procesem <code>f(x)</code>.
+Pokud se žádný prvek načíst nepodaří, pokračuje procesem <code>empty</code>.
+</p>
+
+<p>
+Procesy typu <code>Process1</code> mohou mít stav, můžeme tak napsat například proces,
+který odstraní duplikáty:
+</p>
+
+<pre>
+def nub[A](history: Set[A] = Set.empty[A]): Process1[A, A] =
+  receive1 { x =>
+    if (history.contains(x)) nub(history)
+    else emit(x) ++ nub(history + x)
+  }
+</pre>
+
+<p>
+Prvky, které se objevily, ukládáme do množiny <code>history</code>.
+Pokud se prvek neobjevil, tak ho vyprodukujeme pomocí <code>emit</code> a pokračujeme
+s množinou rozšířenou o <code>x</code> (rekurzivní volání <code>nub(history + x)</code>).
+</p>
+
+<p>
+V některých situacích <code>receive1</code> nestačí.
+Například chceme-li vytvořit <code>Process1</code>,
+jenž sečte všechna čísla a poté součet vyprodukuje:
+</p>
+
+<pre>
+def badSum(s: Int = 0): Process1[Int, Int] = receive1 { x =>
+  badSum(s + x)
+}
+</pre>
+
+<p>
+<code>badSum</code> součet nevyprodukuje. Součet bychom chtěli
+totiž vyprodukovat až poté, co jsou všechna čísla sečtena,
+jenže jak to poznat? Jak poznat, které číslo je poslední?
+Pro tyto případy je k dispozici funkce <code>receive1Or</code>:
+</p>
+
+<pre>
+def sum(s: Int = 0): Process1[Int, Int] = receive1Or[Int, Int](emit(s)) { x =>
+  sum(s + x)
+}
+</pre>
+
+<p>
+První parametr funkce <code>receive1Or</code> je proces, který se použije v případě, že
+už byly načteny všechny prvky &ndash; v našem případě <code>emit(s)</code>.
+Funkce <code>receive1(f)</code> je tedy zkratkou za <code>receive1Or(empty)(f)</code>.
+</p>
+
+<h2>Závěr</h2>
+
+<p>
+Ukázali jsme si, jak lze dva procesy propojit rourou.
+Roura (<code>pipe</code>) napojí jeden proces na proces typu <code>Process1</code>.
+Příště se budeme zabývat procesy s vedlejšími efekty a ukážeme si propojení tvaru T
+(<code>tee</code>), které nám dovolí napojit dva procesy na proces typu <code>Tee</code>.
+</p>
+
+</body>
+</html>
