@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta http-equiv="content-type" content="text/html; charset=utf8">
+<title>scalaz-stream 1: Začínáme</title>
+</head>
+
+<body>
+<h1>scalaz-stream 1: Začínáme</h1>
+
+<p>
+Knihovna <a href="https://github.com/scalaz/scalaz-stream">scalaz-stream</a>
+slouží ke zpracování proudů dat v programovacím jazyce Scala.
+V úvodním článku si řekneme, co to proud dat je,
+kde se proudy dat vyskytují a jak je knihovna
+scalaz-stream užitečná při jejich zpracování.
+</p>
+
+<p>
+Proud dat je posloupnost dat, kde data přicházejí postupně a může jich být i nekonečně mnoho.
+Příkladem proudu dat je proud řádků ze souboru nebo proud z databáze s výsledky dotazu.
+Skládá-li se aplikace z komponent, jenž komunikují zasíláním zpráv,
+máme proudy zpráv mezi komponentami.
+</p>
+
+<p>
+To všechno jsou příklady proudů, s kterými knihovna scalaz-stream může manipulovat.
+Nicméně čtení ze souborů řeší <code>BufferedReader</code>, chceme-li mít aplikaci
+složenou z komponent, jenž si posílají zprávy, můžeme použít aktory z knihovny Akka.
+Proč tedy používat knihovnu scalaz-stream?
+</p>
+
+<ul>
+<li>Jednotnost. S různými proudy lze pracovat stejným způsobem.
+Nezáleží na tom, zda je proud synchronní nebo asynchronní,
+zda je konečný nebo nekonečný,
+zda přichází ze souboru, z databáze nebo z fronty zpráv.
+Jednotnost zvyšuje znovupoužitelnost kódu.
+</li>
+<li>
+Automatická správa zdrojů. Některé proudy bývají spojeny se
+vzácným zdrojem &ndash; např. otevřeným souborem nebo
+spojením do databáze. Knihovna scalaz-stream se automaticky
+postará o otevření a včasné uzavření zdroje.
+Díky tomu chyby, kdy čteme z neotevřeného zdroje
+nebo zdroj neuzavřeme, nemohou nastat.
+</li>
+<li>Množství kombinátorů. Knihovna scalaz-stream obsahuje řadu
+funkcí, pomocí nichž je možné proudy transformovat a kombinovat.
+</li>
+</ul>
+
+<p>
+Nyní si knihovnu scalaz-stream předvedeme na jednoduchém příkladu.
+Poté se podíváme na srovnání knihovny scalaz-stream s jinými knihovnami
+pro zpracování proudů dat.
+</p>
+
+<h2>Příklad: Čtení řádků ze souboru</h2>
+
+<p>
+Začneme programem, který vypíše řádky souboru na standardní výstup:
+</p>
+
+<pre>
+io.linesR("countries.txt")
+  .to(io.stdOutLines)
+  .run.run
+</pre>
+
+<p>
+Výraz <code>io.linesR("countries.txt")</code> reprezentuje proud řádků ze souboru
+<code>countries.txt</code>. Metodou <code>to</code> pošleme obsah proudu na standardní výstup.
+Výraz <code>io.linesR("countries.txt").to(io.stdOutLines)</code> je popis toho, co se má stát.
+Aby se to stalo, musíme popis spustit, což se provede dvojím voláním <code>run</code>.
+</p>
+
+<p>
+Některé funkce známé z kolekcí lze aplikovat i na proudy (např. <code>filter</code>,
+<code>map</code>, <code>collect</code>, <code>zip</code>, <code>take</code>,
+<code>++</code>, &hellip;).
+Následující kód vypíše hlavní město České republiky (jsou-li v souboru <code>capitals.txt</code>
+právě hlavní města zemí ze souboru <code>countries.txt</code> a to navíc ve stejném pořadí):
+</p>
+
+<pre>
+io.linesR("countries.txt")
+  .zip(io.linesR("capitals.txt"))
+  .collect { case ("Czech republic", capital) => capital }
+  .once
+  .to(io.stdOutLines)
+  .run.run
+</pre>
+
+<p>
+<code>zip</code> udělá z proudu zemí a proudu hlavních měst jeden proud, jenž obsahuje dvojice
+(země, hlavní město). <code>collect</code> dostane proud vytvořený funkcí <code>zip</code>
+a napřed z něj vyfiltruje dvojice tvaru <code>("Czech republic", capital)</code>,
+z nichž poté vybere hlavní města.
+<code>once</code> je zkratka za <code>take(1)</code> &ndash; z proudu vezme první prvek.
+</p>
+
+<p>
+Ekvivalentní kód v Javě vypadá následovně:
+</p>
+
+<pre>
+try (
+  BufferedReader countries = new BufferedReader(new FileReader("countries.txt"));
+  BufferedReader capitals = new BufferedReader(new FileReader("capitals.txt"))
+) {
+  String country, capital;
+  while ((country = countries.readLine()) != null && (capital = capitals.readLine()) != null) {
+    if (country.equals("Czech republic")) {
+      System.out.println(capital);
+      break;
+    }
+  }
+}
+</pre>
+ 
+<h2>Srovnání s dalšími knihovnami pro zpracování proudů</h2>
+
+Pojďme se podívat, čím se knihovny pro zpracování proudů liší:
+ 
+<ul>
+<li>Možnosti. Jak moc nás knihovna omezuje?</li>
+<li>Jednoduchost. Jak těžké je naučit se knihovnu používat?</li>
+<li>Automatická správa zdrojů. Musí se o uzavírání zdrojů starat uživatel knihovny?</li>
+<li>Časová složitost. Jaká je časová složitost operací s proudy?</li>
+<li>Rozšířenost. Kolik má knihovna uživatelů?</li>
+</ul>
+ 
+<h3>Iterátory (synchronní kolekce) a reactive extensions (asynchronní kolekce)</h3>
+
+<p>
+V Javě i jiných programovacích jazycích můžeme pracovat s proudy dat pomocí iterátorů.
+Na rozdíl od knihovny scalaz-stream se iterátory nepostarají o uzavírání zdrojů,
+to zůstane stále na programátorovi. Další nevýhodou iterátorů je, že nepodporují asynchronní
+proudy &ndash; například při čekání na výsledky z databáze zablokuje iterátor vlákno, v němž
+běží.
+</p>
+
+<p>
+Iterátory mají rozhraní <code>Iterable</code>.
+Knihovny z rodiny reactive extensions přináší duální rozhraní <code>Observable</code>,
+které slouží pro asynchronní proudy. Bohužel ani <code>Observable</code> se nepostará
+o uvolňování zdrojů.
+Navíc oddělením synchronních proudů od asynchronních proudů vzniká problém
+se znovupoužitelností kódu &ndash; kód napsaný pro rozhraní <code>Iterable</code>
+nebude fungovat s rozhraním <code>Observable</code> a naopak.
+</p>
+
+<p>Kromě toho mají obě rozhraní problém s časovou složitostí některých operací.
+Například časová složitost zřetězení proudů bude záležet na uzávorkování: zřetězení uzávorkované
+doleva (tj. <code>(a ++ b) ++ c</code>) bude mít kvadratickou časovou složitost a zřetězení
+uzávorkované doprava (tj. <code>a ++ (b ++ c)</code>) bude mít lineární časovou složitost.
+S knihovnou scalaz-stream na uzávorkování nezáleží,
+zřetězení má vždy lineární časovou složitost.
+</p>
+
+<h3>Knihovny založené na principu inversion of control</h3>
+
+<p>
+Jak vyřešit problém s uvolňováním zdrojů? Jednoduše, nedat uživateli možnost zdroje
+alokovat ani uvolňovat. Příkladem je funkce
+</p>
+
+<pre>
+def eachLine(path: String, f: String => Unit): Unit
+</pre>
+
+<p>
+jenž otevře soubor <code>path</code>, pro každý jeho řádek zavolá funkci <code>f</code>
+a poté soubor zavře. Tato funkce řeší problém s uvolňování zdrojů.
+Cenou za to je ztráta kontroly &ndash;
+například není možné načítání řádků předčasně zastavit,
+vždy budou načteny všechny řádky souboru.
+</p>
+
+<p>
+Principu, na němž je funkce <code>eachLine</code> založena, se říká
+<a href="http://en.wikipedia.org/wiki/Inversion_of_control">inversion of control</a>.
+Na tomto principu funguje i knihovna scalaz-stream a celá řada dalších
+knihoven pro zpracování proudů s automatickou správou zdrojů.
+Srovnání těchto knihoven lze najít v prezentaci o knihovně
+<a href="https://dl.dropboxusercontent.com/u/4588997/Machines.pdf">Machines</a>,
+přičemž knihovnu scalaz-stream lze považovat za vylepšené Machines.
+</p>
+
+<h2>Závěr</h2>
+
+<p>
+V tomto článku jsme se podívali, co knihovna scalaz-stream nabízí.
+Příště se naučíme používat základní kombinátory z knihovny scalaz-stream.
+</p>
+</body>
+</html>
