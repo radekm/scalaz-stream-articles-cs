@@ -1,0 +1,716 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta http-equiv="content-type" content="text/html; charset=utf8">
+<title>scalaz-stream 3: Procesy s vedlejšími efekty</title>
+</head>
+
+<body>
+<h1>scalaz-stream 3: Procesy s vedlejšími efekty</h1>
+
+<p>
+V tomto článku si popíšeme typ <code>Task</code> a ukážeme si,
+jak konstruovat procesy s vedlejšími efekty, jenž dělají požadavky typu
+<code>Task</code>. Poté se budeme věnovat <code>Sink</code>ům a
+<code>Channel</code>ům. Na závěr článku si řekneme něco o plánovaných změnách
+v knihovně scalaz-stream.
+</p>
+
+<p>
+Používáme knihovnu scalaz-stream verze 0.7a a předpokládáme následující
+importy:
+</p>
+
+<pre>
+import scalaz.concurrent.Task
+import scalaz.stream._
+import Process._
+</pre>
+
+<p>
+Při programování s knihovnou scalaz-stream je zvykem,
+že vedlejší efekty dělají pouze procesy s požadavky typu
+<code>Task</code>. Pomocí funkce <code>Task.delay</code> můžeme do
+<code>Task</code>u zabalit každý výraz, například:
+</p>
+
+<pre>
+val t = Task.delay { println("Hi") }
+</pre>
+
+<p>
+Jak již víme, <code>Task</code> lze spustit pomocí funkce <code>run</code>:
+</p>
+
+<pre>
+t.run
+</pre>
+
+<p>
+Při každém spuštění se zabalený výraz vyhodnotí
+a získaná hodnota je vrácena funkcí <code>run</code>.
+Při každém spuštění <code>t</code> se tedy vypíše řetězec Hi
+a <code>run</code> vrátí hodnotu <code>()</code> typu <code>Unit</code>.
+Další funkcí, která vytváří <code>Task</code>, je
+<code>Task.now</code>:
+</p>
+
+<pre>
+val t = Task.now(5 + 3)
+</pre>
+
+<p>
+Rozdíl mezi funkcemi <code>Task.now</code> a <code>Task.delay</code> spočívá
+v tom, že funkci <code>Task.now</code> se argument předává hodnotou (argument
+je vyhodnocen před zavoláním funkce) a funkci <code>Task.delay</code>
+se předává jménem. V našem případě je tedy výraz <code>5 + 3</code>
+vyhodnocen a teprve poté je zkonstruován <code>Task</code>.
+Například následující <code>Task</code> vrací pokaždé stejné náhodné číslo:
+</p>
+
+<pre>
+import scala.util.Random
+
+val badRandNumGen = Task.now { Random.nextInt }
+</pre>
+
+<p>
+Náhodné číslo je totiž vygenerováno ještě před zkonstruováním
+<code>Task</code>u, při jeho spouštění se žádné náhodné
+číslo negeneruje. Použijeme-li <code>Task.delay</code>
+místo <code>Task.now</code>
+</p>
+
+<pre>
+val randNumGen = Task.delay { Random.nextInt }
+</pre>
+
+<p>
+dostaneme <code>Task</code>, který při každém spuštění generuje nové
+náhodné číslo. Pokud výraz uvnitř <code>Task</code>u vyhodí výjimku,
+je tato výjimka následně vyhozena i funkcí <code>run</code>.
+Alternativně můžeme použít funkci <code>attemptRun</code>,
+která výjimku nevyhazuje, ale vrací. Výsledek funkce
+<code>attemptRun</code> má typ <code>Throwable \/ A</code>,
+kde <code>\/</code> je jako <code>Either</code>.
+Například
+</p>
+
+<pre>
+Task.delay { 5 / 0 }.attemptRun
+</pre>
+
+<p>
+vrátí hodnotu tvaru <code>-\/(_: ArithmeticException)</code>.
+Chceme-li do <code>Task</code>u zabalit asynchronní
+výpočet, použijeme funkci <code>Task.async</code>:
+</p>
+
+<pre>
+import scalaz.\/
+
+def startAsyncComputation[A](cb: (Throwable \/ A) => Unit): Unit = ???
+
+val t = Task.async(startAsyncComputation)
+</pre>
+
+<p>
+Funkce <code>startAsyncComputation</code> spustí asynchronní výpočet a skončí.
+Výsledek asynchronního výpočtu se do <code>t</code> předá pomocí callbacku
+<code>cb</code>, který funkce <code>startAsyncComputation</code>
+dostala jako argument. Funkce <code>Task.async</code> je obzvláště užitečná
+pro propojení s okolním světem. Například díky <code>Task.async</code> snadno
+napíšeme funkci, která převede <code>Future</code> na <code>Task</code>:
+</p>
+
+<pre>
+import scala.concurrent.Future
+import scala.concurrent.ExecutionContext.Implicits.global
+import scala.util.{Failure, Success}
+import scalaz.{-\/, \/-}
+
+def futureToTask[A](fut: => Future[A]): Task[A] =
+  Task.async[A](cb => fut onComplete {
+    case Success(a) => cb(\/-(a))
+    case Failure(t) => cb(-\/(t))
+  })
+</pre>
+
+<p>
+<code>Future</code> se funkci <code>futureToTask</code> předává jménem,
+aby se zamezilo jejímu spuštění před spuštěním
+<code>Task</code>u. Zde je příklad použití:
+</p>
+
+<pre>
+val t = futureToTask(Future(println("Hi")))
+t.run
+</pre>
+
+<p>
+Na závěr našeho stručného představení <code>Task</code>u poznamenejme,
+že <code>Task</code> je monáda, k dispozici jsou tudíž funkce
+<code>map</code>, <code>flatMap</code> i <code>for</code> notace.
+</p>
+
+<h2>Procesy a <code>Task</code>y</h2>
+
+<p>
+Máme-li <code>Task</code>, můžeme pomocí <code>eval</code> vytvořit proces,
+který <code>Task</code> spustí a vyprodukuje hodnotu z <code>Task</code>u.
+Například proces, který vyprodukuje jedno náhodné číslo:
+</p>
+
+<pre>
+eval(randNumGen)
+</pre>
+
+<p>
+Název <code>eval</code> je poněkud zavádějící, neboť <code>eval</code>
+<code>Task</code>y nespouští a ani nijak nevyhodnocuje, <code>eval</code>
+pouze zabalí <code>Task</code> do procesu. Například
+</p>
+
+<pre>
+val randomNumbers = eval(randNumGen).repeat
+</pre>
+
+<p>
+je proces s mnoha náhodnými čísly, nikoliv s jedním
+náhodným číslem, které se opakuje. <code>eval</code> do procesu zabalí celý
+<code>Task</code>, tj. nedojde k tomu, že by <code>eval</code> napřed spustil
+<code>Task</code> <code>randNumGen</code>
+a poté do procesu zabalil pouze výsledek <code>Task</code>u.
+</p>
+
+<p>
+<code>eval</code> a <code>repeat</code> se často používají společně,
+proto vznikla funkce <code>repeatEval</code>, která nám výše uvedený
+proces náhodných čísel dovoluje přepsat na jedno volání:
+</p>
+
+<pre>
+val randomNumbers = repeatEval(randNumGen)
+</pre>
+
+<p>
+Pokud nás výsledek <code>Task</code>u nezajímá, můžeme použít
+<code>eval_</code>, který <code>Task</code> spustí, ale jeho výsledek zahodí:
+</p>
+
+<pre>
+val p = eval_(Task.delay { println("Starting") }) ++ randomNumbers
+</pre>
+
+<p>
+<code>p</code> je proces produkující čísla, kdybychom však místo
+<code>eval_</code> použili <code>eval</code>, měli bychom proces produkující
+<code>AnyVal</code> &ndash; první vyprodukovaný prvek
+by byl <code>()</code> vrácený <code>println("Starting")</code>,
+ten by byl následován náhodnými čísly.
+Obecně, chceme-li, aby proces žádné prvky neprodukoval, můžeme použít
+funkci <code>drain</code>, ta z procesu, který produkuje prvky typu
+<code>A</code>, udělá proces, který neprodukuje žádné prvky
+(typ produkovaných prvků je <code>Nothing</code>).
+<code>eval_(t)</code> je zkratka za <code>eval(t).drain</code>.
+</p>
+
+<h2>Procesy se zdroji</h2>
+
+<p>
+Nyní se pokusíme napsat proces, který přečte a vyprodukuje řádky
+ze souboru &ndash; něco jako <code>io.linesR</code>. Náš první pokus je:
+</p>
+
+<pre>
+import scala.io.Source
+
+def badLinesR(file: String): Process[Task, String] =
+  eval(Task.delay { Source.fromFile(file) }).flatMap { src =>
+    lazy val lines = src.getLines
+    repeatEval(Task.delay { lines.next }) ++ eval_(Task.delay { src.close })
+  }
+</pre>
+
+<p>
+První problém funkce <code>badLinesR</code> je, že volá
+<code>lines.next</code> aniž by testovala <code>lines.hasNext</code>.
+Pokud je <code>lines.haxNext</code> <code>false</code>, není chování
+<code>lines.next</code> definováno. Otázkou je, co dělat, když je
+<code>lines.hasNext</code> <code>false</code>?
+Pro tyto případy existuje speciální výjimka
+<code>Cause.Terminated(Cause.End)</code>,
+kterou můžeme vyhodit. Tato výjimka zajistí, že <code>repeatEval</code> skončí
+a pokračuje se další částí procesu &ndash; v našem případě
+<code>eval_(Task.delay { src.close })</code>.
+</p>
+
+<p>
+Další problém funkce <code>badLinesR</code> je, že nezaručuje uzavření souboru.
+Tento problém nastane, pokud proces předčasně přerušíme, například pomocí
+<code>take</code>:
+</p>
+
+<pre>
+// Simuluje cteni souboru se dvema radky.
+val p =
+  eval(Task.delay { println("Line 1") }) ++
+  eval(Task.delay { println("Line 2") }) ++
+  eval_(Task.delay { println("Closing") })
+
+p.take(1).run.run // Closing se nevypise.
+p.take(2).run.run // Closing se nevypise.
+p.take(3).run.run
+</pre>
+
+<p>
+Problém s neuzavřením souboru rovněž nastane, když <code>Task</code> vyhodí
+jinou výjimku než <code>Cause.Terminated(Cause.End)</code>:
+</p>
+
+<pre>
+val p =
+  eval(Task.delay { 5 / 0 }) ++
+  eval_(Task.delay { println("Closing") })
+
+p.run.run // Closing se nevypise, run vyhodi vyjimku.
+</pre>
+
+<p>
+S výjimkou <code>Cause.Terminated(Cause.End)</code> tento problém nenastane
+a soubor se uzavře:
+</p>
+
+<pre>
+val p =
+  eval(Task.delay { throw Cause.Terminated(Cause.End) }) ++
+  eval_(Task.delay { println("Closing") })
+
+p.run.run // Closing se vypise, run zadnou vyjimku nevyhodi.
+</pre>
+
+<p>
+Obecně, máme-li proces tvaru <code>p ++ q</code> a skončí-li <code>p</code>
+výjimkou jinou než <code>Cause.Terminated(Cause.End)</code>, proces
+<code>q</code> se vůbec nevykoná.
+Pokud se <code>q</code> má vykonat v každém případě bez ohledu na to,
+jak skončil proces <code>p</code>, je třeba použít <code>onComplete</code>
+místo <code>++</code>:
+</p>
+
+<pre>
+val p =
+  eval(Task.delay { 5 / 0 }) onComplete
+  eval_(Task.delay { println("Closing") })
+
+p.run.run // Closing se vypise, run vyhodi vyjimku.
+</pre>
+
+<p>
+Nyní již známe vše, abychom napsali funkci <code>linesR</code>:
+</p>
+
+<pre>
+def linesR(file: String): Process[Task, String] =
+  eval(Task.delay { Source.fromFile(file) }).flatMap { src =>
+    lazy val lines = src.getLines
+    repeatEval(Task.delay {
+      if (lines.hasNext) lines.next
+      else throw Cause.Terminated(Cause.End)
+    }) onComplete eval_(Task.delay { src.close })
+  }
+</pre>
+
+<p>
+V knihovně scalaz-stream je funkce <code>io.resource</code>, která zobecňuje
+naši funkci <code>linesR</code> pro jiné zdroje. Ostatní funkce v modulu
+<code>io</code> (včetně funkce <code>io.linesR</code>) využívají tuto obecnou
+funkci <code>io.resource</code>.
+</p>
+
+<p>
+Jak již víme, <code>p onComplete q</code> zajistí, že se <code>q</code>
+spustí bez ohledu na to, jak skončilo <code>p</code>. Kromě toho
+<code>onComplete</code> zajistí, že proces <code>q</code> není možné přerušit:
+</p>
+
+<pre>
+val p = emit(1)
+val q =
+  eval_(Task.delay { println("One") }) ++
+  emit(2) ++
+  eval_(Task.delay { println("Two") })
+val r = p onComplete q
+
+r.take(2).run.run // Vypise One i Two.
+</pre>
+
+<p>
+Ačkoliv z procesu <code>r</code> načítáme pouze dva prvky, proces
+<code>q</code> doběhne celý &ndash; vypíše se i řetězec Two.
+Pokud by <code>q</code> byl proces, který nikdy neskončí (například
+<code>emit(0).repeat</code>), tak by ani proces <code>r.take(2)</code> nikdy
+neskončil. <code>p onComplete q</code> se nejčastěji používá v situacích,
+kdy proces <code>q</code> má uklidit po procesu <code>p</code> &ndash;
+<code>q</code> nejde přerušit, aby bylo zaručeno, že se úklid provede celý.
+</p>
+
+<h2><code>Sink</code> a <code>Channel</code></h2>
+
+<p>
+V této části se budeme zabývat tím, jak
+prvky produkované procesem někam uložit nebo někam zapsat.
+Pokud proces produkuje málo prvků a stačí, když se zápis provede
+až celý proces skončí, můžeme použít <code>runLog</code>. Proces spustíme
+pomocí <code>runLog.run</code> a poté, co skončí, vyprodukované prvky zapíšeme.
+</p>
+
+<p>
+Situace se ovšem zkomplikuje, když proces produkuje (neomezeně) mnoho
+prvků a my je chceme zapisovat průběžně. V některých případech (například
+logování) lze zápisy umístit do <code>map</code> nebo do nějakého jiného
+procesu typu <code>Process1</code>. Pokud však zápisy prvků používají
+<code>Task</code> (například proto, že jsou asynchronní, nebo proto,
+že je dobrým zvykem vedlejší efekty umístit do <code>Task</code>ů),
+je třeba použít i proces
+s typem požadavků <code>Task</code>, což <code>Process1</code> není.
+</p>
+
+<p>
+Naštěstí má výše nastíněný problém velmi jednoduché řešení.
+Tím řešením je proces funkcí. Pojďme se podívat na příklad.
+Mějme proces řádků ze souboru
+</p>
+
+<pre>
+val p: Process[Task, String] = io.linesR("file.txt")
+</pre>
+
+<p>
+a předpokládejme, že chceme tyto řádky zapsat na standardní výstup.
+K zápisu na standardní výstup použijeme proces
+funkcí, které zapisují na standardní výstup:
+</p>
+
+<pre>
+val stdOut: Process[Task, String => Unit] = constant(println)
+</pre>
+
+<p>
+<code>constant(a)</code> je zkratka za <code>emit(a).repeat</code>.
+Pro každý řádek z <code>p</code> zavoláme funkci
+ze <code>stdOut</code> &ndash; k tomu lze použít <code>zip</code>
+a <code>map</code>
+</p>
+
+<pre>
+p.zip(stdOut).map { case (line, f) => f(line) }.run.run
+</pre>
+
+<p>
+nebo <code>zipWith</code>:
+</p>
+
+<pre>
+p.zipWith(stdOut) { (line, f) => f(line) }.run.run
+</pre>
+
+<p>
+To funguje, ale vedlejší efekt <code>f(line)</code>
+se stále provádí v procesu typu <code>Process1</code>.
+Navíc opět nepoužíváme <code>Task</code> &ndash; funkce, které provádí
+vedlejší efekty, mají typ <code>String => Unit</code>.
+Změníme tedy typ funkcí ze <code>String => Unit</code>
+na <code>String => Task[Unit]</code>:
+</p>
+
+<pre>
+val stdOut: Process[Task, String => Task[Unit]] =
+  constant(s => Task.delay { println(s) })
+</pre>
+
+<p>
+Když spustíme náš kód
+</p>
+
+<pre>
+p.zipWith(stdOut) { (line, f) => f(line) }.run.run
+</pre>
+
+<p>
+zjistíme, že se nic nevypisuje. Problém je v tom,
+že proces
+</p>
+
+<pre>
+p.zipWith(stdOut) { (line, f) => f(line) }
+</pre>
+
+<p>
+produkuje <code>Task</code>y, které nespouští &ndash; typ procesu je
+<code>Process[Task, Task[Unit]]</code>.
+Aby se něco vypsalo, potřebujeme produkované <code>Task</code>y spustit, což
+provede funkce <code>eval</code>:
+</p>
+
+<pre>
+p.zipWith(stdOut) { (line, f) => f(line) }.eval.run.run
+</pre>
+
+<p>
+<code>eval</code> tedy z procesu typu <code>Process[Task, Task[A]]</code>
+udělá proces typu <code>Process[Task, A]</code>. <code>stdOut</code>
+je <code>Sink</code>. Pro typ <code>Process[Task, A => Task[Unit]]</code>
+existuje typový alias <code>Sink[Task, A]</code>.
+Data do <code>Sink</code>u posíláme funkcí <code>to</code>:
+</p>
+
+<pre>
+p.to(stdOut).run.run
+</pre>
+
+<p>
+Funkce <code>to</code> je implementována pomocí <code>zipWith</code>
+a <code>eval</code> &ndash; přesně jako v našem příkladu.
+S pomocí funkce <code>io.resource</code>
+snadno naimplementujeme <code>Sink</code>, který zapisuje řádky do souboru:
+</p>
+
+<pre>
+import java.io.FileWriter
+
+def linesW(file: String): Sink[Task, String] =
+  io.resource(
+    Task.delay { new FileWriter(file) }
+  )(
+    fw => Task.delay { fw.close() }
+  )(
+    fw => Task.now(line => Task.delay { fw.write(line); fw.write("\n") })
+  )
+</pre>
+
+<p>
+<code>to</code> nahrazuje produkované prvky hodnotou <code>()</code>.
+Pokud chceme prvky zachovat, musíme použít funkci <code>observe</code> &ndash;
+ta se chová jako <code>to</code>, ale nenahrazuje prvky hodnotou
+<code>()</code>. S pomocí <code>observe</code> můžeme poslat prvky do více
+<code>Sink</code>ů:
+</p>
+
+<pre>
+p.observe(stdOut).to(linesW("file2.txt")).run.run
+</pre>
+
+<p>
+Do <code>Sink</code>u <code>stdOut</code> můžeme posílat pouze řetězce,
+pokud bychom tam chtěli poslat několik náhodných
+čísel, museli bychom čísla převést na řetězce:
+</p>
+
+<pre>
+randomNumbers.map(_.toString).observe(stdOut).take(10).runLog.run
+</pre>
+
+<p>
+Stinnou stránkou tohoto řešení je, že proces už neprodukuje
+čísla, ale řetězce. V podobných případech se hodí funkce
+<code>contramap</code>, která změní změní typ vstupních prvků
+<code>Sink</code>u:
+</p>
+
+<pre>
+randomNumbers.observe(stdOut.contramap(_.toString)).take(10).runLog.run
+</pre>
+
+<p>
+<code>contramap</code> lze snadno implementovat pomocí
+<code>map</code> &ndash; v našem případě by <code>map</code>
+transformoval funkce typu <code>String => Task[Unit]</code> na funkce typu
+<code>Int => Task[Unit]</code>.
+</p>
+
+<p>
+<code>Sink[Task, A]</code> je proces, který produkuje funkce
+<code>A => Task[Unit]</code>.
+Nahradíme-li <code>Unit</code> typovým parametrem <code>B</code>, dostaneme
+proces, kterému se říká <code>Channel</code>. <code>Channel[Task, A, B]</code>
+je tedy alias pro <code>Process[Task, A => Task[B]]</code>
+a <code>Sink[Task, A]</code> můžeme chápat jako alias
+pro <code>Channel[Task, A, Unit]</code>. <code>Channel[Task, A, B]</code>
+používáme pro transformaci prvků typu <code>A</code> na prvky typu
+<code>B</code>. Do <code>Channel</code>u se prvky posílají pomocí funkce
+<code>through</code>, typ vstupních prvků lze změnit pomocí funkce
+<code>contramap</code>.
+</p>
+
+<p>
+Připomeňme si <code>Process1</code> <code>nub</code> pro odstranění duplikátů
+z minulého dílu
+</p>
+
+<pre>
+def nub[A](history: Set[A] = Set.empty[A]): Process1[A, A] =
+  receive1 { x =>
+    if (history.contains(x)) nub(history)
+    else emit(x) ++ nub(history + x)
+  }
+</pre>
+
+<p>
+a zkusme napsat <code>Channel</code>, který dělá totéž. První nepříjemnost je,
+že <code>Channel</code> transformuje jeden prvek vstupu
+na jeden prvek výstupu, jenže <code>nub</code> v případě duplikátů
+žádné prvky neprodukuje. Toto omezení <code>Channel</code>ů obejdeme tak,
+že použijeme <code>Channel</code> typu
+<code>Channel[Task, A, Option[A]]</code>
+(místo <code>Channel[Task, A, A]</code>) &ndash;
+pro duplikáty bude <code>Channel</code> vracet <code>None</code>.
+</p>
+
+<p>
+Další nepříjemností je, že nemůžeme použít rekurzi pro předávání
+aktualizované množiny <code>history</code>. Problém je v tom,
+že <code>Channel</code> napřed vyprodukuje funkce
+<code>A => Task[Option[A]]</code>
+a teprve poté jsou tyto funkce aplikovány a <code>Task</code>y spuštěny
+pomocí <code>through</code>. Samotný <code>Channel</code> tedy žádné
+filtrování neprovádí &ndash; ten pouze produkuje funkce
+<code>A => Task[Option[A]]</code>. Filtrování
+se provádí až pomocí <code>through</code> &ndash; je to tedy funkce
+<code>through</code>, od níž bychom potřebovali, aby předávala množinu
+<code>history</code> mezi funkcemi z <code>Channel</code>u. Jelikož funkce
+<code>through</code> nic takového neumí, musíme si pomoci sami &ndash;
+po spuštění <code>Channel</code>u vytvoříme měnitelnou množinu, kterou
+dáme do všech produkovaných funkcí:
+</p>
+
+<pre>
+def nubChannel[A]: Channel[Task, A, Option[A]] =
+  eval(Task.delay {
+    collection.mutable.Set.empty[A]
+  }).flatMap { history =>
+    constant((x: A) => Task.delay {
+      if (history.contains(x)) None
+      else {
+        history += x
+        Some(x)
+      }
+    }).toSource
+  }
+</pre>
+
+<p>
+Použití <code>nub</code>:
+</p>
+
+<pre>
+Process(1, 2, 1, 0, 1, 2).toSource |> nub()
+</pre>
+
+<p>
+Použití <code>nubChannel</code>:
+</p>
+
+<pre>
+(Process(1, 2, 1, 0, 1, 2).toSource through nubChannel) |> process1.stripNone
+</pre>
+
+<p>
+Na rozdíl od <code>Channel</code>u může <code>Process1</code> vrátit
+libovolný počet prvků a snáze se tam pracuje se stavem. Na rozdíl
+od <code>Process1</code> může <code>Channel</code>
+provádět vedlejší efekty. Pokud nepotřebujeme vedlejší efekty,
+dáváme přednost <code>Process1</code> před <code>Channel</code>em &ndash;
+důvodem je právě flexibilita <code>Process1</code>.
+</p>
+
+<h2>Výhled do budoucna</h2>
+
+<p>
+Hezké je, že řadu funkcí, které jsme si zde představili, může
+napsat i uživatel knihovny. Například <code>p.drain</code>
+můžeme nahradit <code>p.flatMap { x => empty }</code> nebo <code>p.run</code>
+lze nahradit funkcemi <code>p.drain.runLog</code>. Už jsme také viděli,
+že <code>repeatEval(t)</code> je zkratka za <code>eval(t).repeat</code>,
+nebo ne? Skutečnost bohužel není tak růžová, jak by se mohlo zdát:
+</p>
+
+<pre>
+val x = eval(Task.delay { throw Cause.Terminated(Cause.End) }).repeat
+val y = repeatEval(Task.delay { throw Cause.Terminated(Cause.End) })
+</pre>
+
+<p>
+Na rozdíl od procesu <code>y</code> proces <code>x</code> nikdy neskončí.
+V případě výjimky <code>Cause.Terminated(Cause.End)</code> se tedy
+<code>repeatEval</code> nechová jako <code>eval</code> a <code>repeat</code>.
+V případě jiných výjimek se <code>x</code> i <code>y</code> chovají stejně.
+Příkladem stejného charakteru je proces <code>p.eval</code>, který můžeme
+zapsat jako <code>p.flatMap(eval)</code>, ale opět zjistíme, že
+se v případě výjimky <code>Cause.Terminated(Cause.End)</code>
+obě konstrukce liší:
+</p>
+
+<pre>
+val x = constant(Task.delay { throw Cause.Terminated(Cause.End) }).flatMap(eval)
+val y = constant(Task.delay { throw Cause.Terminated(Cause.End) }).eval
+</pre>
+
+<p>
+V uvedeném příkladu <code>x</code> opět neskončí a <code>y</code> ano.
+Pravděpodobně z tohoto důvodu bude
+výjimka <code>Cause.Terminated(Cause.End)</code> odstraněna
+z další verze knihovny scalaz-stream.
+</p>
+
+<p>
+Další plánovaná změna v knihovně scalaz-stream se týká funkcí
+<code>++</code> a <code>onComplete</code>. Kdybychom místo <code>++</code>
+a <code>onComplete</code> použili
+syntaxi jazyka Scala, pak by se proces <code>p ++ q</code> zapisoval jako
+<code>{ p; q }</code>
+a <code>p onComplete q</code> jako <code>try { p } finally { q }</code>.
+Následující dva procesy se tedy chovají jinak:
+</p>
+
+<pre>
+val x = (p ++ q) onComplete r
+val y = p ++ (q onComplete r)
+</pre>
+
+<p>
+Použijeme-li syntax Scaly, je x ekvivalentní
+</p>
+
+<pre>
+try { p; q } finally { r }
+</pre>
+
+<p>
+a y ekvivalentní
+</p>
+
+<pre>
+p
+try { q } finally { r }
+</pre>
+
+<p>
+U <code>x</code> se <code>r</code> vykoná vždy, zatímco u <code>y</code>
+se <code>r</code> nevykoná, pokud <code>p</code> skončí výjimkou.
+Některým uživatelům knihovny se toto chování nelíbí a chtěli by, aby
+se proces <code>r</code> v obou případech vykonal vždy.
+</p>
+
+<h2>Závěr</h2>
+
+<p>
+Příště se naučíme, jak napojit více procesů na jeden proces.
+Řeč bude o procesech typu <code>Tee</code> a <code>Wye</code>
+a o funkcích <code>tee</code> a <code>wye</code>.
+Například nám již známé funkce <code>zip</code> a <code>zipWith</code>
+lze implementovat pomocí typu <code>Tee</code> a funkce <code>tee</code>.
+</p>
+
+</body>
+</html>
